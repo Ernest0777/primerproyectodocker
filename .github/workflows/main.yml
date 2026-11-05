@@ -8,6 +8,12 @@ on:
 env:
   AWS_REGION: us-east-2
   ECR_REPOSITORY: primerproyectodocker
+  ECS_CLUSTER: iac-dev-ecs
+  ECS_SERVICE: iac-dev-app
+
+concurrency:
+  group: deploy-ecs-main
+  cancel-in-progress: false
 
 jobs:
   build-and-push:
@@ -37,3 +43,34 @@ jobs:
           docker build -f dockerfile -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG -t $ECR_REGISTRY/$ECR_REPOSITORY:latest .
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+
+      - name: Actualizar ECS con la nueva imagen latest
+        id: deploy-ecs
+        run: |
+          DEPLOYMENT_ID=$(aws ecs update-service \
+            --cluster "$ECS_CLUSTER" \
+            --service "$ECS_SERVICE" \
+            --force-new-deployment \
+            --region "$AWS_REGION" \
+            --query 'service.deployments[?status==`PRIMARY`].id | [0]' \
+            --output text)
+          echo "deployment_id=$DEPLOYMENT_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Esperar y verificar el despliegue de ECS
+        env:
+          DEPLOYMENT_ID: ${{ steps.deploy-ecs.outputs.deployment_id }}
+        run: |
+          aws ecs wait services-stable \
+            --cluster "$ECS_CLUSTER" \
+            --services "$ECS_SERVICE" \
+            --region "$AWS_REGION"
+          ROLLOUT_STATE=$(aws ecs describe-services \
+            --cluster "$ECS_CLUSTER" \
+            --services "$ECS_SERVICE" \
+            --region "$AWS_REGION" \
+            --query "services[0].deployments[?id=='$DEPLOYMENT_ID'].rolloutState | [0]" \
+            --output text)
+          if [ "$ROLLOUT_STATE" != "COMPLETED" ]; then
+            echo "::error::El despliegue $DEPLOYMENT_ID no se completo (estado: $ROLLOUT_STATE). Revisa los eventos de ECS."
+            exit 1
+          fi
