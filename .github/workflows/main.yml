@@ -1,49 +1,60 @@
-name: Build and Push to Amazon ECR
+name: Test, Build and Deploy to ECS
 
 on:
   push:
-    branches:
-      - main
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 env:
-  AWS_REGION: us-east-2
-  ECR_REPOSITORY: primerproyectodocker
-  ECS_CLUSTER: iac-dev-ecs
-  ECS_SERVICE: iac-dev-app
+  AWS_REGION: ${{ vars.AWS_REGION || 'us-east-2' }}
+  ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY || 'primerproyectodocker' }}
+  ECS_CLUSTER: ${{ vars.ECS_CLUSTER || 'iac-dev-ecs' }}
+  ECS_SERVICE: ${{ vars.ECS_SERVICE || 'iac-dev-app' }}
 
 concurrency:
   group: deploy-ecs-main
   cancel-in-progress: false
 
 jobs:
-  build-and-push:
-    name: Build and Push Docker Image
+  test:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Pruebas HTTP de la aplicacion
+        working-directory: src
+        run: npm test
 
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
       - name: Configurar credenciales de AWS
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
           aws-region: ${{ env.AWS_REGION }}
-
-      - name: Ingresar a  Amazon ECR
+      - name: Ingresar a Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
-
-      - name: Build, tag, and push Docker image
+      - name: Construir y publicar imagen Linux amd64
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          IMAGE_TAG: ${{ github.run_number }}
+          IMAGE_TAG: ${{ github.sha }}
         run: |
-          docker build -f dockerfile -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG -t $ECR_REGISTRY/$ECR_REPOSITORY:latest .
-          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
-          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
-
+          docker build --platform linux/amd64 -f dockerfile \
+            -t "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" \
+            -t "$ECR_REGISTRY/$ECR_REPOSITORY:latest" .
+          docker push "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+          docker push "$ECR_REGISTRY/$ECR_REPOSITORY:latest"
       - name: Actualizar ECS con la nueva imagen latest
         id: deploy-ecs
         run: |
@@ -51,26 +62,19 @@ jobs:
             --cluster "$ECS_CLUSTER" \
             --service "$ECS_SERVICE" \
             --force-new-deployment \
-            --region "$AWS_REGION" \
-            --query 'service.deployments[?status==`PRIMARY`].id | [0]' \
+            --query "service.deployments[?status=='PRIMARY'].id | [0]" \
             --output text)
           echo "deployment_id=$DEPLOYMENT_ID" >> "$GITHUB_OUTPUT"
-
       - name: Esperar y verificar el despliegue de ECS
         env:
           DEPLOYMENT_ID: ${{ steps.deploy-ecs.outputs.deployment_id }}
         run: |
-          aws ecs wait services-stable \
-            --cluster "$ECS_CLUSTER" \
-            --services "$ECS_SERVICE" \
-            --region "$AWS_REGION"
+          aws ecs wait services-stable --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE"
           ROLLOUT_STATE=$(aws ecs describe-services \
-            --cluster "$ECS_CLUSTER" \
-            --services "$ECS_SERVICE" \
-            --region "$AWS_REGION" \
+            --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE" \
             --query "services[0].deployments[?id=='$DEPLOYMENT_ID'].rolloutState | [0]" \
             --output text)
           if [ "$ROLLOUT_STATE" != "COMPLETED" ]; then
-            echo "::error::El despliegue $DEPLOYMENT_ID no se completo (estado: $ROLLOUT_STATE). Revisa los eventos de ECS."
+            echo "::error::El despliegue $DEPLOYMENT_ID no termino: $ROLLOUT_STATE"
             exit 1
           fi
