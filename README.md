@@ -32,7 +32,7 @@ Ctrl+C detiene el servidor. Para las pruebas, en otra terminal desde `app/src`:
 npm test
 ```
 
-Las dos pruebas verifican el saludo y `/health`; no requieren `npm install`.
+Las pruebas verifican el saludo, `/health` y la espera del despliegue; no requieren `npm install`.
 El código está en `src/index.js`, las pruebas en `test/app.test.js` y la imagen
 se define en `dockerfile`, con Node 24 Alpine y usuario `node`.
 
@@ -44,6 +44,9 @@ Publica el contenido de `app` como raíz de su propio repositorio, incluida `.gi
 
 El pipeline ejecuta pruebas, construye la imagen Linux amd64, publica los tags
 del commit y `latest` en ECR, actualiza ECS y verifica que el despliegue termine.
+`scripts/wait-for-deployment.mjs` consulta el despliegue concreto cada 15 segundos,
+hasta 20 minutos. Solo acepta `COMPLETED` con el servicio estable; detecta fallos
+y reemplazos sin confundir tareas activas con un despliegue terminado.
 
 En Settings → Secrets and variables → Actions, configura estos **Secrets**:
 
